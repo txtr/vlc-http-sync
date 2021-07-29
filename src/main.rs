@@ -1,17 +1,12 @@
-use reqwest;
 use std::cmp::Ordering;
-use std::{thread, time};
 use std::env;
+use std::{thread, time};
 
-const SECOND: time::Duration = time::Duration::from_secs(1);
-
-const AUTH: &str = "Basic OjEyMzQ=";
-const ACCEPTABLE_SLIP: u64 = 3; // in seconds
+const AUTH: &str = "Basic OjEyMzQ="; // base64 encoded password for string ":1234"
+const ACCEPTABLE_SLIP: u64 = 2; // in seconds
 const SLAVE_PLAYER_URL: &str = "http://localhost:8080/requests/status.xml";
-// const MASTER_PLAYER_URL: &str = "http://c7dd9f13aa0d.in.ngrok.io/requests/status.xml";
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Player {
     state: String,
     looping: bool,
@@ -23,82 +18,72 @@ struct Player {
 }
 
 fn get_player(client: &reqwest::blocking::Client, url: &str) -> Result<Player, reqwest::Error> {
-    let response = client
-        .get(url)
-        .header("Authorization", AUTH)
-        .send();
+    let response = client.get(url).header("Authorization", AUTH).send();
 
     match response {
         Ok(r) => {
             let text = r.text().unwrap();
             return Ok(Player {
                 state: text
-                    .clone()
-                    .split("<state>")
-                    .nth(1)
-                    .unwrap()
                     .split("</state>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<state>")
+                    .last()
                     .unwrap()
                     .parse::<String>()
                     .unwrap(),
                 looping: text
-                    .clone()
-                    .split("<loop>")
-                    .nth(1)
-                    .unwrap()
                     .split("</loop>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<loop>")
+                    .last()
                     .unwrap()
                     .parse::<bool>()
                     .unwrap(),
                 random: text
-                    .clone()
-                    .split("<random>")
-                    .nth(1)
-                    .unwrap()
                     .split("</random>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<random>")
+                    .last()
                     .unwrap()
                     .parse::<bool>()
                     .unwrap(),
                 repeat: text
-                    .clone()
-                    .split("<repeat>")
-                    .nth(1)
-                    .unwrap()
                     .split("</repeat>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<repeat>")
+                    .last()
                     .unwrap()
                     .parse::<bool>()
                     .unwrap(),
                 length: text
-                    .clone()
-                    .split("<length>")
-                    .nth(1)
-                    .unwrap()
                     .split("</length>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<length>")
+                    .last()
                     .unwrap()
                     .parse::<u64>()
                     .unwrap(),
                 position: text
-                    .clone()
-                    .split("<position>")
-                    .nth(1)
-                    .unwrap()
                     .split("</position>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<position>")
+                    .last()
                     .unwrap()
                     .parse::<f64>()
                     .unwrap(),
                 time_elapsed: text
-                    .clone()
-                    .split("<time>")
-                    .nth(1)
-                    .unwrap()
                     .split("</time>")
-                    .nth(0)
+                    .next()
+                    .unwrap()
+                    .split("<time>")
+                    .last()
                     .unwrap()
                     .parse::<u64>()
                     .unwrap(),
@@ -177,48 +162,52 @@ fn prep(client: &reqwest::blocking::Client, url: &str) {
     repeat_off(client, url);
 }
 
-fn sync(client: &reqwest::blocking::Client, master_player: Player, slave_player: Player) {
-    if master_player.length == slave_player.length {
-        if master_player.state == "stopped" {
-            if slave_player.state != "stopped" {
-                stop(client);
-            }
-        } else /* if master_player.state == "playing" || master_player.state == "paused" */ {
-            let slip: u64 = match master_player.time_elapsed.cmp(&slave_player.time_elapsed) {
-                Ordering::Less => slave_player.time_elapsed - master_player.time_elapsed,
-                Ordering::Greater => master_player.time_elapsed - slave_player.time_elapsed,
-                Ordering::Equal => 0,
-            };
-            println!("{}", slip);
-            if slip > ACCEPTABLE_SLIP {
-                seek(client, master_player.time_elapsed);
-            }
+fn correct(client: &reqwest::blocking::Client, master_player: &Player, slave_player: &Player) {
+    let slip: u64 = match master_player.time_elapsed.cmp(&slave_player.time_elapsed) {
+        Ordering::Less => slave_player.time_elapsed - master_player.time_elapsed,
+        Ordering::Greater => master_player.time_elapsed - slave_player.time_elapsed,
+        Ordering::Equal => 0,
+    };
+    println!("slip = {} sec", slip);
+    if slip > ACCEPTABLE_SLIP {
+        seek(client, master_player.time_elapsed);
+        println!("corrected")
+    }
+}
 
-            if master_player.state == "playing" && slave_player.state != "playing" {
-                play(client);
-            } else if master_player.state == "paused" && slave_player.state != "paused" {
-                pause(client);
-            }
+fn sync(client: &reqwest::blocking::Client, master_player: Player, slave_player: Player) {
+    if master_player.state == "stopped" && slave_player.state != "stopped" {
+        stop(client);
+    } else if slave_player.state == "stopped" {
+        println!("Instruction: Play the same file as other vlc player.")
+    } else if master_player.length == slave_player.length {
+        correct(client, &master_player, &slave_player);
+        if master_player.state == "playing" && slave_player.state != "playing" {
+            play(client);
+        } else if master_player.state == "paused" && slave_player.state != "paused" {
+            pause(client);
         }
     } else {
-        println!("Err: Files are of different length.")
+        println!("Error: Files are of different length. Stalling sync. untill resolved.");
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
     let master_player_url: String = format!("{}{}", &args[1], "/requests/status.xml");
     let master_player_url: &str = &master_player_url[..];
-
-    
-    // let slave_player_url = &args[2];
 
     let client = reqwest::blocking::Client::new();
     prep(&client, SLAVE_PLAYER_URL);
     prep(&client, master_player_url);
     loop {
         println!("syncing...");
-        sync(&client, get_player(&client, master_player_url).unwrap(), get_player(&client, SLAVE_PLAYER_URL).unwrap());
-        thread::sleep(SECOND);
+        sync(
+            &client,
+            get_player(&client, master_player_url).unwrap(),
+            get_player(&client, SLAVE_PLAYER_URL).unwrap(),
+        );
+        thread::sleep(time::Duration::from_secs(1));
     }
 }
